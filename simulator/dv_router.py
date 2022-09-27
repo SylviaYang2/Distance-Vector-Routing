@@ -5,6 +5,7 @@ Based on skeleton code by:
   MurphyMc, zhangwen0411, lab352
 """
 
+from pickle import TRUE
 import sim.api as api
 from cs168.dv import (
     RoutePacket,
@@ -35,7 +36,7 @@ class DVRouter(DVRouterBase):
     SEND_ON_LINK_UP = False
 
     # Determines if you send poison when a link goes down
-    POISON_ON_LINK_DOWN = False
+    POISON_ON_LINK_DOWN = True
 
     def __init__(self):
         """
@@ -57,6 +58,10 @@ class DVRouter(DVRouterBase):
         self.table = Table()
         self.table.owner = self
 
+        # {(host, port): TableEntry(dst, port, latency, expire_time)}
+        # record the latest route advertisement
+        self.history = {}
+
     def add_static_route(self, host, port):
         """
         Adds a static route to this router's table.
@@ -73,6 +78,8 @@ class DVRouter(DVRouterBase):
         assert port in self.ports.get_all_ports(), "Link should be up, but is not."
 
         # TODO: fill this in!
+        latency = self.ports.get_latency(port)
+        self.table[host] = TableEntry(host, port, latency, expire_time=FOREVER)
 
     def handle_data_packet(self, packet, in_port):
         """
@@ -86,6 +93,21 @@ class DVRouter(DVRouterBase):
         """
         # TODO: fill this in!
 
+        # If no route exists for a packet’s destination
+        dest = packet.dst
+        if dest not in self.table:
+            return
+
+        entry = self.table.get(dest)
+        # if the latency is greater than or equal to INFINITY you should also drop the packet
+        if entry.latency >= INFINITY:
+            return
+
+        if entry.port == in_port:
+            return
+
+        self.send(packet, entry.port)
+
     def send_routes(self, force=False, single_port=None):
         """
         Send route advertisements for all routes in the table.
@@ -98,6 +120,41 @@ class DVRouter(DVRouterBase):
         :return: nothing.
         """
         # TODO: fill this in!
+        # Send route advertisements for all routes
+        for host, entry in self.table.items():
+            for port in self.ports.get_all_ports():
+
+                next_hop = entry.port
+                history_entry = self.history.get((host, port))
+
+                if self.SPLIT_HORIZON:
+                    if port != next_hop:
+                        self.send_route(port, host, entry.latency)
+
+                elif self.POISON_REVERSE:
+                    if port == next_hop:
+                        if force == False:
+                            if history_entry == None or history_entry.destination != host or history_entry.latency != INFINITY:
+                                self.send_route(port, host, INFINITY)
+                                self.history[(port, host)] = TableEntry(
+                                    host, port, INFINITY, entry.expire_time)
+                        else:
+                            self.send_route(port, host, INFINITY)
+                            self.history[(port, host)] = TableEntry(
+                                host, port, INFINITY, entry.expire_time)
+                    else:
+                        if force == False:
+                            if history_entry == None or history_entry.destination != host or history_entry.latency != entry.latency:
+                                self.send_route(port, host, entry.latency)
+                                self.history[(port, host)] = TableEntry(
+                                    host, port, entry.latency, entry.expire_time)
+                        else:
+                            self.send_route(port, host, entry.latency)
+                            self.history[(port, host)] = TableEntry(
+                                host, port, entry.latency, entry.expire_time)
+
+                else:
+                    self.send_route(port, host, entry.latency)
 
     def expire_routes(self):
         """
@@ -105,6 +162,18 @@ class DVRouter(DVRouterBase):
         accordingly.
         """
         # TODO: fill this in!
+        for host in list(self.table.keys()):
+            entry = self.table.get(host)
+
+            # expired route poisoning
+            if self.POISON_EXPIRED and entry.has_expired:
+                poison_route = TableEntry(
+                    host, entry.port, INFINITY, self.ROUTE_TTL)
+                self.table[host] = poison_route
+
+            # if the route has expired
+            elif entry.has_expired:
+                del self.table[host]
 
     def handle_route_advertisement(self, route_dst, route_latency, port):
         """
@@ -116,6 +185,39 @@ class DVRouter(DVRouterBase):
         :return: nothing.
         """
         # TODO: fill this in!
+        cur_best_route = self.table.get(route_dst)
+
+        link_latency = self.ports.get_latency(port)
+        new_latency = link_latency + route_latency
+        new_exp_time = api.current_time() + self.ROUTE_TTL
+        new_route = TableEntry(route_dst, port, new_latency, new_exp_time)
+
+        # if cur_best_route == None and route_latency < INFINITY: # if destination not in table - add to table
+        if cur_best_route == None and route_latency < INFINITY:
+            self.table[route_dst] = new_route
+
+        else:
+            next_hop = cur_best_route.port
+            cur_latency = cur_best_route.latency
+
+            # Ad from a poisoned entry
+            if route_latency >= INFINITY and next_hop == port:
+                # if cur_latency >= INFINITY:
+                #     return
+                poisoned_entry = TableEntry(
+                    route_dst, port, INFINITY, cur_best_route.expire_time)
+                self.table[route_dst] = poisoned_entry
+
+            elif new_latency < cur_latency:  # if found a better route
+                self.table[route_dst] = new_route
+
+            elif new_latency == cur_latency:  # break tie to choose the current route
+                self.table[route_dst] = cur_best_route
+
+            elif next_hop == port:  # if the advertiser is current_next_hop
+                self.table[route_dst] = new_route
+
+        self.send_routes(False)
 
     def handle_link_up(self, port, latency):
         """
@@ -128,6 +230,9 @@ class DVRouter(DVRouterBase):
         self.ports.add_port(port, latency)
 
         # TODO: fill in the rest!
+        for host, entry in self.table.items():
+            if self.SEND_ON_LINK_UP:
+                self.send_route(port, host, entry.latency)
 
     def handle_link_down(self, port):
         """
@@ -139,5 +244,15 @@ class DVRouter(DVRouterBase):
         self.ports.remove_port(port)
 
         # TODO: fill this in!
+        for host in list(self.table.keys()):
+            entry = self.table.get(host)
+            next_hop = entry.port
+            if port == next_hop:
+                if self.POISON_ON_LINK_DOWN:
+                    poison_route = TableEntry(
+                        host, port, INFINITY, self.ROUTE_TTL)
+                    self.table[host] = poison_route
+                    self.send_routes(False)
+                del self.table[host]
 
     # Feel free to add any helper methods!
