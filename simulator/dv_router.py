@@ -30,13 +30,13 @@ class DVRouter(DVRouterBase):
     # -----------------------------------------------
 
     # Determines if you send poison for expired routes
-    POISON_EXPIRED = False
+    POISON_EXPIRED = True
 
     # Determines if you send updates when a link comes up
     SEND_ON_LINK_UP = False
 
     # Determines if you send poison when a link goes down
-    POISON_ON_LINK_DOWN = True
+    POISON_ON_LINK_DOWN = False
 
     def __init__(self):
         """
@@ -222,8 +222,6 @@ class DVRouter(DVRouterBase):
 
             # Ad from a poisoned entry
             if route_latency >= INFINITY and next_hop == port:
-                # if cur_latency >= INFINITY:
-                #     return
                 poisoned_entry = TableEntry(
                     route_dst, port, INFINITY, cur_best_route.expire_time)
                 self.table[route_dst] = poisoned_entry
